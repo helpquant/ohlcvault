@@ -31,9 +31,9 @@ MARKETS: dict[str, dict] = {
 
 NAMESPACES = ("stock", "index")
 
-# 默认镜像链。域名在 M5 发布准备阶段最终确定，可用 OHLCVAULT_MIRRORS 覆盖。
+# 默认镜像链。可用 OHLCVAULT_MIRRORS 覆盖。
 DEFAULT_MIRRORS: list[str] = [
-    "https://data.helpquant.com",
+    "https://data.ohlcvault.com",
     "https://cdn.jsdelivr.net/gh/helpquant/ohlcvault-data@main",
     "https://raw.githubusercontent.com/helpquant/ohlcvault-data/main",
 ]
