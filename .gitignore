@@ -1,0 +1,24 @@
+# 构建产物
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.py[cod]
+
+# 虚拟环境
+.venv/
+venv/
+
+# 测试与缓存
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+
+# 契约镜像是**生成物**，由 ohlcvault_server/tools/sync_contract.py 写入，
+# 但**必须提交**（消费方要能独立校验契约），所以这里不忽略。
