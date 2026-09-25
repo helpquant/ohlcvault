@@ -38,7 +38,14 @@ from .codes import market_of as market_of
 from .codes import normalize as normalize_symbol
 from .codes import split as split_symbol
 from .codes import to_api, to_storage
-from .config import DEFAULT_CACHE, DEFAULT_MIRRORS, MARKETS, TIMEOUT, mirrors_from_env
+from .config import (
+    DEFAULT_CACHE,
+    DEFAULT_MIRRORS,
+    MARKETS,
+    TIMEOUT,
+    VERSION,
+    mirrors_from_env,
+)
 from .errors import (
     ConfigError,
     ContractError,
@@ -51,13 +58,15 @@ from .errors import (
     UnknownMarket,
 )
 from .store import Bars, Store, period_of, periods_between
+from .sql import connect_duckdb, to_duckdb  # 可选扩展（duckdb 缺失时导入不报错）
 
-__version__ = "0.1.0"
+__version__ = VERSION
 
 __all__ = [
     "Bars", "Store", "MarketClient", "connect", "use", "reset",
     "symbols", "symbol", "calendar", "daily", "index_daily", "daily_many",
     "cross_section", "adjust", "snapshot", "coverage", "coverage_note",
+    "to_duckdb", "connect_duckdb",
     "period_of", "periods_between", "sha256_bytes", "sha256_file",
     "normalize_symbol", "to_api", "to_storage", "market_of", "split_symbol",
     "__version__",
@@ -77,7 +86,8 @@ def connect(
     snapshot: str | None = None,
     timeout: int = TIMEOUT,
     validate: bool = True,
-    shard_cache: int = 4,
+    shard_cache: int = 24,
+    materialize: bool = True,
     quiet: bool = False,
 ) -> Store:
     """建立（并记住）默认 Store。
@@ -85,13 +95,17 @@ def connect(
     `mirrors` 缺省时依次读环境变量 `OHLCVAULT_MIRRORS` 与内置默认链。
     镜像既可以是 http(s) URL，也可以是**本地目录** —— 后者让离线复现和
     自建镜像站都不需要额外代码。
+
+    `shard_cache`：已解析月分片 LRU（单片全市场 ≈ 20~25MB，默认 24 ≈ 500MB）。
+    `materialize`：全历史读过的标的物化到缓存目录，同一快照下二读毫秒级。
     """
     global _default
     ms = mirrors or mirrors_from_env()
     if not ms:
         raise ConfigError("没有可用镜像：显式传入 mirrors 或设置 OHLCVAULT_MIRRORS")
     cli = MarketClient(ms, cache_dir or DEFAULT_CACHE, snapshot=snapshot, timeout=timeout)
-    st = Store(cli, validate=validate, shard_cache=shard_cache)
+    st = Store(cli, validate=validate, shard_cache=shard_cache,
+               materialize=materialize)
     _default = st
     if not quiet:
         _announce(st)

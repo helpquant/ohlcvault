@@ -20,11 +20,10 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
-import urllib.request
 from pathlib import Path
 
-from .config import USER_AGENT
 from .errors import HashMismatch, SnapshotUnavailable  # noqa: F401  （对外保留此名）
+from .net import HTTPPool
 
 CHUNK = 1 << 20
 
@@ -66,6 +65,7 @@ class MarketClient:
         self._mf: dict | None = None
         self._sid: str | None = None
         self._lock = threading.Lock()
+        self._pool = HTTPPool(timeout=timeout)
 
     # ---------- 底层 IO ----------
 
@@ -75,11 +75,14 @@ class MarketClient:
 
     def _fetch_raw(self, m: str, rel: str) -> bytes:
         if m.startswith("http"):
+            # keep-alive 连接池：分片是几百连发的场景，复用 TLS 连接
+            # 把冷缓存全历史拉取从「分钟级握手开销」里解放出来（net.py）。
+            # 自定义 UA 仍然必须：Cloudflare 边缘默认拦截 Python-urllib/*（403）。
             self.stats["net"] += 1
-            # 必须带自定义 UA：Cloudflare 等边缘默认拦截 Python-urllib/*（403）
-            req = urllib.request.Request(f"{m}/{rel}", headers={"User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
-                return r.read()
+            body, status = self._pool.get(f"{m}/{rel}")
+            if status >= 400:
+                raise OSError(f"HTTP {status}: {m}/{rel}")
+            return body
         p = Path(m) / rel
         if not p.is_file():
             raise FileNotFoundError(rel)

@@ -18,6 +18,7 @@ import re
 from bisect import bisect_left, bisect_right
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Iterable, Iterator
 
 from .codes import market_of, normalize, to_api
@@ -177,15 +178,27 @@ class Bars:
 
 
 class Store:
-    """按快照读取数据。构造后所有读取都针对**同一个快照 id**，天然可复现。"""
+    """按快照读取数据。构造后所有读取都针对**同一个快照 id**，天然可复现。
+
+    性能旋钮：
+
+    - `shard_cache`：已解析月分片的 LRU 容量。单片（全市场、近月）解析后
+      约 20~25MB，默认 24 ≈ 500MB 上限；批量回测请优先用 `daily_many()`
+      （每片只装载一次），或显式调大此值。
+    - `materialize`：全历史读取后按标的物化到 `{cache}/symbols/{sid}/`，
+      同一快照下二读毫秒级（文件绑定快照 id，快照变更自然失效）。
+    """
 
     def __init__(self, client: MarketClient, validate: bool = True,
-                 shard_cache: int = 4):
+                 shard_cache: int = 24, materialize: bool = True):
         self.client = client
         self.validate = validate
         self._shard_cache: OrderedDict[str, dict] = OrderedDict()
         self._shard_cache_max = max(1, shard_cache)
+        self._block_index: dict[str, dict[str, dict]] = {}
         self._meta_cache: dict[str, dict] = {}
+        self.materialize = materialize
+        self.stats: dict = {"materialize_hit": 0, "materialize_write": 0}
 
     # ---------- 基础 ----------
 
@@ -315,14 +328,21 @@ class Store:
                     raise ContractError(f"{rel}: 重复的 s={blk['s']}")
                 seen.add(blk["s"])
         self._shard_cache[rel] = doc
+        self._block_index[rel] = {blk["s"]: blk for blk in doc["symbols"]}
         while len(self._shard_cache) > self._shard_cache_max:
-            self._shard_cache.popitem(last=False)
+            old, _ = self._shard_cache.popitem(last=False)
+            self._block_index.pop(old, None)
         return doc
 
     def _block(self, market: str, period: str, storage: str,
                namespace: str, refresh: bool) -> dict | None:
         doc = self.shard(market, period, namespace, refresh=refresh)
-        for blk in doc["symbols"]:
+        rel = (f"daily/{'idx/' if namespace == 'index' else ''}"
+               f"{market}/{period}.json.gz")
+        idx = self._block_index.get(rel)
+        if idx is not None:                     # O(1) 索引（shard() 已建）
+            return idx.get(storage)
+        for blk in doc["symbols"]:              # 降级：线性扫描
             if blk["s"] == storage:
                 return blk
         return None
@@ -401,6 +421,81 @@ class Store:
         hi = len(days) if end is None else bisect_right(days, end)
         return days[lo:hi]
 
+    # ---------- 按标的物化缓存 ----------
+
+    def _mat_path(self, storage: str, namespace: str) -> Path:
+        sid = self.client.snapshot
+        ns = "idx" if namespace == "index" else "stock"
+        return (Path(self.client.cache) / "symbols" / sid / ns
+                / f"{storage}.json.gz")
+
+    def _mat_load(self, storage: str, namespace: str) -> dict | None:
+        """读物化文件。绑定快照 id（内容寻址），不匹配 / 损坏一律视为未命中。"""
+        p = self._mat_path(storage, namespace)
+        if not p.is_file():
+            return None
+        try:
+            doc = json.loads(gzip.decompress(p.read_bytes()))
+            if doc.get("snapshot") == self.client.snapshot:
+                return doc
+        except Exception:
+            pass                            # 损坏 → 当作未命中，重新从分片装配
+        return None
+
+    def _mat_save(self, storage: str, namespace: str, header: dict,
+                  acc: dict, has_af: bool) -> None:
+        """把装配好的全历史数组物化到本地。mtime=0，与项目可复现性约定一致。
+
+        只在**无日期切片**的全历史装配后调用 —— 物化的是完整序列，
+        带 start/end 的读取从它二次切片（O(log n)），不再触碰任何分片。
+        """
+        p = self._mat_path(storage, namespace)
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            doc = {"schema": 1, "snapshot": self.client.snapshot,
+                   "s": storage, "header": header, "has_af": has_af, **acc}
+            tmp = p.with_suffix(".tmp")
+            with open(tmp, "wb") as f:
+                # mtime=0：同内容产出同字节，缓存文件也可复现
+                with gzip.GzipFile(fileobj=f, mode="wb", mtime=0) as gz:
+                    gz.write(json.dumps(doc, separators=(",", ":")).encode())
+            tmp.replace(p)
+            self.stats["materialize_write"] += 1
+        except OSError:
+            pass                            # 缓存写失败不致命，静默降级
+
+    def _mat_header(self, doc: dict, mkt: str) -> dict:
+        return doc.get("header") or {
+            "price_scale": PRICE_SCALE, "currency": MARKETS[mkt]["currency"],
+            "volume_unit": "share", "af_basis": "unavailable",
+            "source": "", "af_scale": None}
+
+    def _mat_to_bars(self, doc: dict, mkt: str, namespace: str,
+                     start: int | None, end: int | None) -> Bars:
+        """物化文档 → Bars（可选二次切片）。"""
+        acc = {k: list(doc[k])
+               for k in ("d", "o", "h", "l", "c", "v", "a", "af")}
+        if start is not None or end is not None:
+            d = acc["d"]
+            lo = 0 if start is None else bisect_left(d, start)
+            hi = len(d) if end is None else bisect_right(d, end)
+            acc = {k: v[lo:hi] for k, v in acc.items()}
+        header = self._mat_header(doc, mkt)
+        has_af = bool(doc.get("has_af"))
+        if self.validate:
+            self._validate_series(acc, start, end, doc["s"])
+        return Bars(
+            symbol=to_api(doc["s"]), market=mkt, namespace=namespace,
+            price_scale=header.get("price_scale", PRICE_SCALE),
+            currency=header.get("currency", MARKETS[mkt]["currency"]),
+            volume_unit=header.get("volume_unit", "share"),
+            af_basis=header.get("af_basis", "unavailable"),
+            af_scale=header.get("af_scale"),
+            source=header.get("source", ""),
+            d=acc["d"], o=acc["o"], h=acc["h"], l=acc["l"], c=acc["c"],
+            v=acc["v"], a=acc["a"], af=acc["af"] if has_af else None,
+        )
+
     # ---------- 时间序列 ----------
 
     def daily(self, code: str, start: int | None = None, end: int | None = None,
@@ -426,32 +521,48 @@ class Store:
 
     def _assemble(self, storage: str, mkt: str, namespace: str,
                   start: int | None, end: int | None, refresh: bool) -> Bars:
-        periods = self.available_periods(mkt, namespace)
-        if start is not None or end is not None:
-            lo = start if start is not None else 0
-            hi = end if end is not None else 99991231
-            keep = set(periods_between(lo, hi))
-            periods = [p for p in periods if p in keep]
+        mat = (self._mat_load(storage, namespace)
+               if (self.materialize and not refresh) else None)
+        if mat is not None:
+            # 物化快路径：同一快照下读过一次的全历史，二读毫秒级。
+            acc = {k: list(mat[k]) for k in ("d", "o", "h", "l", "c", "v", "a", "af")}
+            has_af = bool(mat.get("has_af"))
+            header = self._mat_header(mat, mkt)
+            self.stats["materialize_hit"] += 1
+        else:
+            periods = self.available_periods(mkt, namespace)
+            if start is not None or end is not None:
+                lo = start if start is not None else 0
+                hi = end if end is not None else 99991231
+                keep = set(periods_between(lo, hi))
+                periods = [p for p in periods if p in keep]
 
-        acc: dict[str, list] = {k: [] for k in
-                                ("d", "o", "h", "l", "c", "v", "a", "af")}
-        header: dict | None = None
-        has_af = True
-        for p in periods:
-            blk = self._block(mkt, p, storage, namespace, refresh)
-            if blk is None:
-                continue                      # 该月无数据（未上市/停牌/退市后）
-            if header is None:
-                header = self.shard(mkt, p, namespace, refresh=refresh)
-            chunk = self._slice_block(blk, start, end)
-            if chunk is None:
-                continue
-            for k in ("d", "o", "h", "l", "c", "v", "a"):
-                acc[k].extend(chunk[k])
-            if chunk["af"] is None:
-                has_af = False
-            else:
-                acc["af"].extend(chunk["af"])
+            acc: dict[str, list] = {k: [] for k in
+                                    ("d", "o", "h", "l", "c", "v", "a", "af")}
+            header: dict | None = None
+            has_af = True
+            for p in periods:
+                blk = self._block(mkt, p, storage, namespace, refresh)
+                if blk is None:
+                    continue                  # 该月无数据（未上市/停牌/退市后）
+                if header is None:
+                    header = self.shard(mkt, p, namespace, refresh=refresh)
+                chunk = self._slice_block(blk, start, end)
+                if chunk is None:
+                    continue
+                for k in ("d", "o", "h", "l", "c", "v", "a"):
+                    acc[k].extend(chunk[k])
+                if chunk["af"] is None:
+                    has_af = False
+                else:
+                    acc["af"].extend(chunk["af"])
+
+            # 全历史装配成功 → 物化（切片请求不写：物化对象是完整序列）
+            if self.materialize and start is None and end is None and header is not None:
+                slim = {k: header.get(k) for k in
+                        ("price_scale", "currency", "volume_unit",
+                         "af_basis", "af_scale", "source")}
+                self._mat_save(storage, namespace, slim, acc, has_af)
 
         if header is None:
             # 快照里完全没有该标的任何月份 —— 先确认它确实在清单里，
@@ -465,6 +576,13 @@ class Store:
             header = {"price_scale": PRICE_SCALE, "currency": MARKETS[mkt]["currency"],
                       "volume_unit": "share", "af_basis": "unavailable",
                       "source": "", "af_scale": None}
+
+        # 物化路径拿到的是全历史，带日期参数时二次切片
+        if mat is not None and (start is not None or end is not None):
+            d = acc["d"]
+            lo = 0 if start is None else bisect_left(d, start)
+            hi = len(d) if end is None else bisect_right(d, end)
+            acc = {k: v[lo:hi] for k, v in acc.items()}
 
         if self.validate:
             self._validate_series(acc, start, end, storage)
@@ -514,6 +632,19 @@ class Store:
         start = _as_ymd(start, "start")
         end = _as_ymd(end, "end")
 
+        # 物化快路径：已物化的标的直接从本地文件装配（毫秒级），不碰分片
+        out: dict[str, Bars] = {}
+        if self.materialize and not refresh:
+            for st in list(storages):
+                doc = self._mat_load(st, namespace)
+                if doc is not None:
+                    mkt = storages.pop(st)[0]
+                    self.stats["materialize_hit"] += 1
+                    out[to_api(st)] = self._mat_to_bars(doc, mkt, namespace,
+                                                        start, end)
+        if not storages:
+            return out
+
         # 按 (市场, 月份) 归组
         by_period: dict[tuple[str, str], list[str]] = {}
         for st, (mkt, _) in storages.items():
@@ -550,7 +681,7 @@ class Store:
                     has_af[st] = True
                     tgt["af"].extend(chunk["af"])
 
-        out: dict[str, Bars] = {}
+        out2: dict[str, Bars] = {}
         for st, (mkt, api) in storages.items():
             h = meta.get(st) or {"price_scale": PRICE_SCALE,
                                  "currency": MARKETS[mkt]["currency"],
@@ -559,7 +690,14 @@ class Store:
                                  "af_scale": None}
             if self.validate:
                 self._validate_series(acc[st], start, end, st)
-            out[api] = Bars(
+            # 全历史批量装配成功 → 逐标的物化（下次同类请求走快路径）
+            if (self.materialize and start is None and end is None
+                    and meta.get(st) is not None):
+                slim = {k: meta[st].get(k) for k in
+                        ("price_scale", "currency", "volume_unit",
+                         "af_basis", "af_scale", "source")}
+                self._mat_save(st, namespace, slim, acc[st], has_af[st])
+            out2[api] = Bars(
                 symbol=api, market=mkt, namespace=namespace,
                 price_scale=h.get("price_scale", PRICE_SCALE),
                 currency=h.get("currency", MARKETS[mkt]["currency"]),
@@ -570,7 +708,8 @@ class Store:
                 c=acc[st]["c"], v=acc[st]["v"], a=acc[st]["a"],
                 af=acc[st]["af"] if has_af[st] else None,
             )
-        return out
+        out2.update(out)
+        return out2
 
     # ---------- 断面 ----------
 

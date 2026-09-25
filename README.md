@@ -137,11 +137,40 @@ currently-listed securities) and have no IPO dates. Their daily bars are pending
 An honest data project states its gaps. A dataset that quietly omits them is worse
 than one that is merely incomplete.
 
+## Performance
+
+The store layout (one file per market per month, all symbols inside) is optimized for
+**cross-section reads** (one file = one whole trading day for the market) and for
+**one-download-many-symbols** workflows. Three layers make repeated reads fast:
+
+1. **HTTP keep-alive** — shard fetches reuse TLS connections instead of one handshake
+   per request (cold-cache full-history pulls drop from minutes of handshake overhead).
+2. **Shard LRU** — `connect(shard_cache=N)` keeps N parsed monthly shards in memory
+   (~20–25 MB each for recent full-market months; default 24 ≈ 500 MB).
+3. **Per-symbol materialization** (default on) — the first full-history read of a symbol
+   writes a compact local copy under `{cache}/symbols/{snapshot_id}/`; any later read
+   of the same symbol under the same snapshot is served in milliseconds and never
+   touches a shard. Files are keyed by snapshot id, so a new snapshot invalidates them
+   naturally. Disable with `connect(materialize=False)`.
+
+For SQL workflows, optionally materialize a snapshot into a local DuckDB file
+(`pip install "ohlcvault[duckdb]"` — an optional extra; the core stays zero-dependency):
+
+```python
+p = ov.to_duckdb(store, markets=["cn"])   # writes {cache}/duckdb/{snapshot_id}.duckdb
+con = ov.connect_duckdb(p)                # a local file, not a server
+con.sql("SELECT d, close/1000.0 AS close FROM bars WHERE symbol='600519.SH' ORDER BY d")
+```
+
+`to_duckdb()` is idempotent per snapshot: an existing file for the same snapshot id is
+reused unless `refresh=True`. The DuckDB file is a derived local artifact — it is not
+part of the checksum chain and can be deleted/rebuilt at any time.
+
 ## API
 
 | Function | Purpose |
 |---|---|
-| `connect(mirrors=, cache_dir=, snapshot=)` | Build the default client |
+| `connect(mirrors=, cache_dir=, snapshot=, shard_cache=, materialize=)` | Build the default client |
 | `symbols(market, type=, status=, board=)` | Symbol list |
 | `symbol(code)` | Single symbol entry |
 | `calendar(market, start=, end=)` | Trading calendar |
@@ -150,6 +179,8 @@ than one that is merely incomplete.
 | `daily_many(codes, start=, end=)` | Batch read (preferred for backtests) |
 | `cross_section(market, date, sort_by=, limit=)` | Daily cross-section |
 | `adjust(bars_or_df, to="qfq"\|"hfq"\|"none")` | Adjustment view |
+| `to_duckdb(store, markets=, periods=)` | Materialize snapshot into a local DuckDB file (optional extra) |
+| `connect_duckdb(path)` | Open a materialized DuckDB file for SQL |
 | `snapshot()` | Current snapshot id |
 
 Date parameters (`start` / `end` / `date`) accept an `int` `YYYYMMDD` (preferred)
