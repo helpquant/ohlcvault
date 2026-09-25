@@ -31,6 +31,10 @@ MARKETS: dict[str, dict] = {
 
 NAMESPACES = ("stock", "index")
 
+# HTTP User-Agent。必须带自定义 UA：Cloudflare 等边缘节点默认拦截
+# Python-urllib/* 的请求（403），裸 urllib 会被当成 bot。
+USER_AGENT = "ohlcvault/0.1 (+https://github.com/helpquant/ohlcvault)"
+
 # 默认镜像链。可用 OHLCVAULT_MIRRORS 覆盖。
 DEFAULT_MIRRORS: list[str] = [
     "https://data.ohlcvault.com",

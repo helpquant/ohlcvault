@@ -127,7 +127,7 @@ def test_pinned_snapshot_does_not_follow_latest(mirrors, tmp_path):
 def test_unknown_file_raises_keyerror(mirrors, tmp_path):
     ms, _ = mirrors
     with pytest.raises(KeyError):
-        client(ms, tmp_path / "c9").raw("daily/cn/1999-01.json.gz")
+        client(ms, tmp_path / "c9").raw("daily/cn/1899-01.json.gz")
 
 
 def test_requires_at_least_one_mirror(tmp_path):

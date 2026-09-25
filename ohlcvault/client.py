@@ -23,6 +23,7 @@ import threading
 import urllib.request
 from pathlib import Path
 
+from .config import USER_AGENT
 from .errors import HashMismatch, SnapshotUnavailable  # noqa: F401  （对外保留此名）
 
 CHUNK = 1 << 20
@@ -75,7 +76,9 @@ class MarketClient:
     def _fetch_raw(self, m: str, rel: str) -> bytes:
         if m.startswith("http"):
             self.stats["net"] += 1
-            with urllib.request.urlopen(f"{m}/{rel}", timeout=self.timeout) as r:
+            # 必须带自定义 UA：Cloudflare 等边缘默认拦截 Python-urllib/*（403）
+            req = urllib.request.Request(f"{m}/{rel}", headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 return r.read()
         p = Path(m) / rel
         if not p.is_file():

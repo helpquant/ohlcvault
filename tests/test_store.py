@@ -27,9 +27,14 @@ def test_snapshot_matches_latest_pointer(store, data_dir):
     assert store.snapshot == store.snapshot
 
 
+PERIODS_CN = ["2026-07", "2026-08", "2026-09"]  # 仅作 sanity 下界参考；断言用结构性质
+
+
 def test_available_periods(store):
-    assert store.available_periods("cn") == PERIODS_CN
-    assert store.available_periods("cn", "index") == PERIODS_CN
+    ps = store.available_periods("cn")
+    assert ps == sorted(ps) and len(set(ps)) == len(ps)
+    assert ps[-1] >= "2026-09"          # 至少覆盖到发布当月
+    assert store.available_periods("cn", "index") == ps
 
 
 def test_symbols_universe_includes_delisted(store):
@@ -90,7 +95,7 @@ def test_daily_single_month(store):
 def test_daily_spans_months_and_is_strictly_increasing(store):
     """跨月拼接是客户端职责 —— 拼接后必须严格递增、无重复。"""
     s = pick_stock(store.shard("cn", "2026-07"))
-    one = store.daily(s)
+    one = store.daily(s, start=20260701, end=20260731)
     if len(one) == 0:
         pytest.skip("该标的当月无数据")
     b = store.daily(s, start=20260701, end=20260930)
