@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import http.client
 import threading
+import time
 from urllib.parse import urljoin, urlsplit
 
 from .config import USER_AGENT
@@ -79,8 +80,14 @@ class HTTPPool:
             return self._locks[key]
 
     def _once(self, key, sp, hdrs) -> tuple[bytes, int, str | None]:
-        """单次请求；陈旧连接（服务端已关闭）自动重建重试一次。"""
-        for attempt in (0, 1):
+        """单次请求；瞬态网络故障自动重建重试（最多 4 次 + 线性退避）。
+
+        为什么要多轮：拉一只股票全历史 = 连续几百个分片、几十分钟的长会话，
+        中途一次网络抖动就把整个装配打穿（2026-09-25 e2e 实测）。陈旧连接
+        只需重建一次，真正的瞬态抖动需要隔一段时间再试。
+        """
+        last_exc: Exception | None = None
+        for attempt in range(4):
             try:
                 conn = self._conns.get(key)
                 if conn is None:
@@ -93,7 +100,8 @@ class HTTPPool:
                 body = r.read()
                 self.stats["requests"] += 1
                 return body, r.status, r.getheader("Location")
-            except Exception:
+            except Exception as e:  # noqa: BLE001
+                last_exc = e
                 old = self._conns.pop(key, None)
                 if old is not None:
                     try:
@@ -101,9 +109,9 @@ class HTTPPool:
                     except Exception:
                         pass
                 self.stats["retries"] += 1
-                if attempt == 1:
-                    raise
-        raise OSError("unreachable")  # pragma: no cover
+                if attempt < 3:
+                    time.sleep(0.5 * (attempt + 1))
+        raise last_exc if last_exc else OSError("unreachable")  # pragma: no cover
 
     def _new(self, key) -> http.client.HTTPConnection:
         scheme, netloc = key

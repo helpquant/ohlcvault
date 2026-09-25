@@ -106,7 +106,8 @@ def _canonical(exchange: str, code: str, raw: str) -> str:
     if not code:
         raise SymbolError(f"symbol 缺少代码部分：{raw!r}")
     # 港股代码必须零填充到 5 位（港交所规范，也是 akshare / yfinance 的共同要求）
-    if exchange == "hk":
+    # 仅对**纯数字**代码生效 —— 指数类字母代码（HSI、HSTECH）不填充
+    if exchange == "hk" and code.isdigit():
         code = code.zfill(5)
     code = code.upper() if exchange == "us" else code
     return f"{exchange}.{code}"
