@@ -112,7 +112,7 @@ the caller.
 | No silently-corrupted data | Every file verified against the snapshot's `sha256` |
 | No silently-changed history | Sealed months are never rewritten |
 | No unverifiable numbers | Missing adjustment factors raise, instead of returning raw prices |
-| No hidden survivorship bias | Delisted stocks are kept in the universe and in the data |
+| No hidden survivorship bias | Delisted stocks are kept in the universe and in the data (`cn`; see coverage table for `hk`/`us` limits) |
 | Byte-for-byte reproduction | Fixed-point integers, `gzip` with `MTIME=0`, no wall-clock timestamps |
 
 **Delisted stocks matter.** If your backtest universe only contains companies that
@@ -127,12 +127,13 @@ Coverage is declared explicitly in `meta/symbols/{market}.json` under `coverage`
 
 | Market | Status | Gaps |
 |---|---|---|
-| `cn` | Daily bars + indices, 2000→present | **No Beijing Stock Exchange** (upstream source doesn't provide it) |
-| `hk` | Symbol list only | No daily bars yet; **list is current listings only** |
-| `us` | Symbol list only | No daily bars yet; **list is current listings only** |
+| `cn` | Daily bars 1990-12→present (A-shares incl. 1,187 delisted) + 461 indices | **No Beijing Stock Exchange** (upstream source doesn't provide it); trade calendar starts 2000-01 (upstream boundary — earlier trading days must be inferred from bar dates); ETF/bond lists included, bars not collected |
+| `hk` | Daily bars 2,806 stocks + HSI index (index history from 2013-08) | **List is current listings only** (survivorship bias, no IPO dates); calendar & index history start 2013-08 (free index source boundary) |
+| `us` | Daily bars 7,513 stocks + SPX index (index history from 2004-01) | **List is current listings only** (survivorship bias, no IPO dates); 5,733 ETFs listed but bars not collected; calendar & index history start 2004-01 (free index source boundary) |
 
 `hk` / `us` symbol lists carry **survivorship bias** (the upstream source only returns
-currently-listed securities) and have no IPO dates. Their daily bars are pending.
+currently-listed securities) and have no IPO dates. `cn` is unaffected: 1,187 delisted
+stocks are in the list and their full history (e.g. `600001.SH` from 1998) is in the data.
 
 An honest data project states its gaps. A dataset that quietly omits them is worse
 than one that is merely incomplete.

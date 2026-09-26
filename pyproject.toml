@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ohlcvault"
-version = "0.2.0"
+version = "0.2.1"
 description = "Reproducible, checksummed daily OHLCV data for A-share, HK and US markets — static files, content-addressed snapshots, zero API keys."
 readme = "README.md"
 requires-python = ">=3.10"
