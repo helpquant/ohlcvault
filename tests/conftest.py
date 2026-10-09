@@ -52,9 +52,39 @@ def store(data_dir, tmp_path):
     return ov.connect(mirrors=[str(data_dir)], cache_dir=tmp_path / "cache", quiet=True)
 
 
+def _copy_tree_cow(src: Path, dst: Path) -> None:
+    """复制目录树，尽可能用「写时复制」（APFS clonefile / reflink）。
+
+    mirrors 夹具要为**每个**测试准备多份数据副本；真实数据集在 GB 量级，
+    逐字节复制三遍就是数个 GB —— 会直接吃光开发机磁盘（实测测试进程被
+    SIGKILL 打断，就是因为这里）。COW 副本几乎不额外占空间，而且**写入时
+    自动分离**，所以「篡改某个副本」的测试语义完全成立（硬链接做不到：
+    原地改写会串到其他副本）。平台不支持时回退到普通复制。
+    """
+    import subprocess
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if sys.platform == "darwin":
+        cmd = ["cp", "-Rc"]
+    elif sys.platform.startswith("linux"):
+        cmd = ["cp", "-a", "--reflink=auto"]
+    else:
+        cmd = []
+    if cmd:
+        r = subprocess.run(cmd + [str(src), str(dst)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if r.returncode == 0:
+            return
+    shutil.copytree(src, dst, dirs_exist_ok=True)
+
+
 @pytest.fixture()
 def mirrors(data_dir, tmp_path):
-    """三份独立副本，模拟「R2 / jsDelivr / GitHub raw」的镜像链。
+    """三份独立副本，模拟「主源 + 两个备用源」的镜像链。
+
+    这里的三份是**占位符**（名字沿用历史，不代表当前真实镜像链 —— 真实链见
+    `ohlcvault.config.DEFAULT_MIRRORS`，2026-10-09 起只有两个源）。保留三份是为了
+    让「N 路降级」这条逻辑本身被测到，而不是绑死在当前有几个源上。
 
     用真实字节而不是合成数据 —— 校验、降级、篡改拒绝这些路径只有在
     真实的 gzip 分片上跑才有意义。
@@ -62,8 +92,9 @@ def mirrors(data_dir, tmp_path):
     base = tmp_path / "remote"
     names = ["cloudflare_r2", "jsdelivr", "github_raw"]
     for n in names:
-        shutil.copytree(data_dir, base / n,
-                        ignore=shutil.ignore_patterns(".cache", ".months"))
+        _copy_tree_cow(data_dir, base / n)
+        for skip in (".cache", ".months"):
+            shutil.rmtree(base / n / skip, ignore_errors=True)
     return [str(base / n) for n in names], base
 
 
