@@ -71,7 +71,19 @@ class MarketClient:
 
     @staticmethod
     def _label(m: str) -> str:
-        return m.rsplit("/", 2)[-2] if m.startswith("http") else Path(m).name
+        """镜像的短标签，用于 trace 与 `stats["served_by"]`。
+
+        必须对**裸主机 URL** 也给出可区分的名字：默认镜像链全是
+        `https://<host>` 这种无路径形态，而按「最后一个路径段」取名会得到
+        空串 —— 于是两个不同的镜像在统计里混成同一个 key，
+        「到底命中了主源还是备用源」这个问题就再也答不出来了（实测踩到）。
+        """
+        s = str(m).rstrip("/")
+        if "://" in s:
+            rest = s.split("://", 1)[1]
+            host, _, path = rest.partition("/")
+            return f"{host}/{path}" if path else host
+        return Path(s).name
 
     def _fetch_raw(self, m: str, rel: str) -> bytes:
         if m.startswith("http"):
