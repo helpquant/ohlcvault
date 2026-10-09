@@ -5,9 +5,13 @@
 
 | 镜像 | 角色 | 故障域 |
 |---|---|---|
-| Cloudflare R2 + CDN | 主源 | 商业 CDN：账号封禁、账单异常、区域故障 |
-| GitHub raw / jsDelivr | 备用 1 | 微软系托管：与 Cloudflare 完全独立 |
-| 自有服务器 HTTPS | 备用 2 | 自有机器：唯一完全可控的兜底 |
+| `data.ohlcvault.com`（Cloudflare R2 + CDN） | 主源 | 商业 CDN：账号封禁、账单异常、区域故障 |
+| `data.helpquant.com`（自有服务器 HTTPS） | 备用 1 | 自有机器 + 自有 DNS（DNSPod）：唯一完全可控的兜底 |
+
+历史上这里还有第三个源（`cdn.jsdelivr.net/gh/…` 与 `raw.githubusercontent.com/…`），
+指向数据镜像仓库 `helpquant/ohlcvault-data`。该仓库经 GitHub API 查证 **404，从未
+创建**，两个 URL 都是死链，只会让客户端在冷启动时白付一次超时 —— 已移除。
+日后若真建了 GitHub 镜像仓库，再把它们加回来即可（届时故障域才是真正独立的）。
 
 客户端会**记住哪个镜像成功过**并把它提到首位，所以镜像顺序不是性能关键，
 减少的是「每次请求都先付一次失败超时」。
@@ -33,14 +37,13 @@ NAMESPACES = ("stock", "index")
 
 # HTTP User-Agent。必须带自定义 UA：Cloudflare 等边缘节点默认拦截
 # Python-urllib/* 的请求（403），裸 urllib 会被当成 bot。
-VERSION = "0.2.0"
+VERSION = "0.2.2"
 USER_AGENT = f"ohlcvault/{VERSION} (+https://github.com/helpquant/ohlcvault)"
 
 # 默认镜像链。可用 OHLCVAULT_MIRRORS 覆盖。
 DEFAULT_MIRRORS: list[str] = [
     "https://data.ohlcvault.com",
-    "https://cdn.jsdelivr.net/gh/helpquant/ohlcvault-data@main",
-    "https://raw.githubusercontent.com/helpquant/ohlcvault-data/main",
+    "https://data.helpquant.com",
 ]
 
 DEFAULT_CACHE = Path(

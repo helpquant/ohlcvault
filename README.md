@@ -100,6 +100,17 @@ A mirror can be an HTTP(S) URL **or a local directory**:
 ov.connect(mirrors=["/path/to/data"])
 ```
 
+The built-in chain has two entries whose **failure domains are disjoint** — a
+commercial CDN and a self-hosted origin:
+
+| Mirror | Role | Independent failure domain |
+|---|---|---|
+| `https://data.ohlcvault.com` | primary | commercial CDN: account suspension, billing, regional outage |
+| `https://data.helpquant.com` | fallback | own server + own DNS |
+
+Override with `OHLCVAULT_MIRRORS=https://a,https://b`, or pass `mirrors=` / set
+`OHLCVAULT_CACHE` to keep everything local.
+
 Mirrors are tried in order; whichever one succeeds is promoted to first place. Every
 file is checked against the `sha256` in the snapshot manifest, and anything that
 fails is **discarded and the next mirror is tried** — bad bytes are never handed to
