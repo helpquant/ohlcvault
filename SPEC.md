@@ -64,6 +64,7 @@
 |---|---|---|---|
 | `stock` | 非指数证券（股票、ETF、可转债） | `daily/{market}/` | 有真实成交量与成交额，单位是「股 / 元」 |
 | `index` | 指数 | `daily/idx/{market}/` | 成交量口径与个股**不同源**，见 §9.3 |
+| `min15` | 15 分钟 K 线 | `daily/min15/{market}/` | 日内条形，bar 以**结束时刻**标注，见 §4.6。V1 仅 `cn` 且仅个股 |
 
 **为什么必须分开（这不是洁癖，是正确性要求）：**
 
@@ -130,6 +131,7 @@ meta/symbols/{market}.json                   # 标的清单（含指数、含退
 meta/calendar/{market}.json                  # 交易日历
 daily/{market}/{YYYY-MM}.json.gz             # 月分片 · stock 命名空间
 daily/idx/{market}/{YYYY-MM}.json.gz         # 月分片 · index 命名空间
+daily/min15/{market}/{YYYY-MM}.json.gz       # 月分片 · min15 命名空间（§4.6）
 snapshots/{sid}/root.json                    # 快照摘要
 snapshots/{sid}/manifest.json                # 快照事实清单（逐文件 sha256）
 changes/{sid}.json                           # 相对父快照的增量
@@ -217,7 +219,7 @@ changes/{sid}.json                           # 相对父快照的增量
 |---|---|---|---|
 | `schema` | int | ✔ | 本文件版本，当前 `1` |
 | `market` | str | ✔ | §1.1 市场代码 |
-| `namespace` | str | ✔ | §1.2，`stock` 或 `index` |
+| `namespace` | str | ✔ | §1.2，`stock` / `index` / `min15` |
 | `period` | str | ✔ | `YYYY-MM`，**必须**与文件名一致 |
 | `adjust` | str | ✔ | **恒为 `"none"`**。本数据集只存不复权原始价，见 §9.2 |
 | `price_scale` | int | ✔ | 价格定点标度，`1000` |
@@ -298,6 +300,27 @@ changes/{sid}.json                           # 相对父快照的增量
 **已封月不得重写**是整套设计的地基：正因为历史文件永不变，`immutable` 缓存才安全，用户才有可能「一生下载一次」。
 
 **唯一的例外是交易所追溯修正成交数据**（极罕见）。此时文件内容变了、sha256 变了，客户端按 §10.3 的规则重下即可——**不需要为此改变缓存策略**。
+
+### 4.6 `min15` 命名空间：15 分钟 K 线（v1.1 增补，2026-11-08）
+
+与 §4.1/§4.2 共用文件头与 block 形状，仅以下规则不同：
+
+1. **bar 时刻语义**：block 的 `d` 是 **bar 结束时刻** `YYYYMMDDHHMM`（13 位整数）。
+   沪深一天 16 根：`0945…1130`（8 根）+ `1315…1500`（8 根）。升序、唯一、落在
+   `period` 之内的约束与日线一致。cn 市场固定为北京时间，无需时区字段。
+2. **头部新增两个自描述字段**（`min15` 文件**必须**声明）：`"interval": "15min"`
+   与 `"bar_boundary": "end"`。
+3. **无因子**：头部 `af_basis="unavailable"`，block **不得**含 `af` 键（与 §4.3
+   的条件缺席规则一致）。分钟数据只做 `adjust="none"` 的事实存储。
+4. **单位**：`o/h/l/c` × `price_scale`（1000）；`v` 已归一为**股**；`a` 元——与
+   §9.1/§9.3 完全同口径，不引入新标度。
+5. **覆盖**：V1 仅 `cn`、仅个股（含退市股）。停牌时段没有 bar（无成交即无 K 线），
+   这与日线「停牌补平盘行」的行为**刻意不同**——分钟粒度不虚构流动性。
+6. **回填期豁免**：min15 的深历史回填（baostock 2020-01 起）是渐进过程，回填
+   完成前**已封月可能被补写**。缓存仍按 sealed 发（immutable），sid 随内容滚动，
+   客户端按 §10.3 哈希重下即可。回填完成后恢复「已封月永不重写」。
+7. **来源**：pytdx 主源（近期 ~2 年）+ baostock 深历史（2020-01 起），头部
+   `source` 用 `+` 连接，如 `pytdx_15min+baostock_15min`。
 
 ---
 
@@ -444,7 +467,8 @@ changes/{sid}.json                           # 相对父快照的增量
       "calendar": { "path": "meta/calendar/cn.json", "count": 6543 },
       "monthly": {
         "stock": [ { "period": "2026-07", "path": "daily/cn/2026-07.json.gz", "status": "sealed" } ],
-        "index": [ { "period": "2026-07", "path": "daily/idx/cn/2026-07.json.gz", "status": "sealed" } ]
+        "index": [ { "period": "2026-07", "path": "daily/idx/cn/2026-07.json.gz", "status": "sealed" } ],
+        "min15": [ { "period": "2026-07", "path": "daily/min15/cn/2026-07.json.gz", "status": "sealed" } ]
       },
       "last_trade_date": 20260918
     }
@@ -453,6 +477,8 @@ changes/{sid}.json                           # 相对父快照的增量
 ```
 
 `monthly[namespace]` 按 `period` 升序。`status` ∈ `open`（当月）\| `sealed`（已封月）。
+命名空间键按需出现：某市场没有某个命名空间的数据时，对应键**缺席**（而不是空数组）——
+例如 v1.1 起 `cn` 才有 `min15`，`hk`/`us` 没有。客户端对未知命名空间键**必须**忽略。
 
 ### 7.1 manifest **不得**包含 `snapshot` 字段
 
@@ -646,6 +672,7 @@ sid = sha256( 对每个文件取 "路径:sha256:size" 行 → 排序 → 拼接 
 | 日期 | 变更 |
 |---|---|
 | 2026-09-21 | v1 定稿。确立：指数独立命名空间 `daily/idx/`；`af` 为唯一合法因子键（废止 `f`）；存储前缀式 / API 后缀式的双轨规范；文件头字段统一（`af_scale`、`af_basis`、`currency`、`updated`）；退市股强制入池；显式 `.json.gz`；`meta/manifest.json` 与快照指纹分离。 |
+| 2026-11-08 | v1.1 增补：新增 `min15` 命名空间（`daily/min15/{market}/`，15 分钟 K 线，bar 结束时刻 `YYYYMMDDHHMM`，无因子，V1 仅 cn 个股，见 §4.6）；manifest 的 `monthly` 按需出现命名空间键，客户端必须忽略未知键（§7）。数据形状变更不影响既有 `stock` / `index` 读取。 |
 
 ### 12.1 v1 定稿时推翻的三处早期约定
 
