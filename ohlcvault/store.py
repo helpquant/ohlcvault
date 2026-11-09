@@ -487,11 +487,12 @@ class Store:
         """物化文档 → Bars（可选二次切片）。"""
         acc = {k: list(doc[k])
                for k in ("d", "o", "h", "l", "c", "v", "a", "af")}
-        # min15：8 位 end 当日扩到 23:59（同 _assemble，见那里的注释）
+        # min15：8 位边界扩到当日 00:00 / 23:59（同 _assemble，见那里的注释）
+        start_eff = (start * 10000) if (start is not None and namespace == "min15") else start
         end_eff = (end * 10000 + 2359) if (end is not None and namespace == "min15") else end
-        if start is not None or end_eff is not None:
+        if start_eff is not None or end_eff is not None:
             d = acc["d"]
-            lo = 0 if start is None else bisect_left(d, start)
+            lo = 0 if start_eff is None else bisect_left(d, start_eff)
             hi = len(d) if end_eff is None else bisect_right(d, end_eff)
             acc = {k: v[lo:hi] for k, v in acc.items()}
         header = self._mat_header(doc, mkt)
@@ -547,8 +548,9 @@ class Store:
 
     def _assemble(self, storage: str, mkt: str, namespace: str,
                   start: int | None, end: int | None, refresh: bool) -> Bars:
-        # min15 的 d 是 12 位结束时刻，8 位 end 当日（20260930）必须扩成
-        # 23:59（202609302359）—— 否则 bisect_right 会把当天所有 bar 切掉
+        # min15 的 d 是 12 位结束时刻，8 位 start/end 边界先扩到当日
+        # 00:00 / 23:59 —— 否则 bisect 对 12 位值比较时整段失效
+        start_eff = (start * 10000) if (start is not None and namespace == "min15") else start
         end_eff = (end * 10000 + 2359) if (end is not None and namespace == "min15") else end
         mat = (self._mat_load(storage, namespace)
                if (self.materialize and not refresh) else None)
@@ -576,7 +578,7 @@ class Store:
                     continue                  # 该月无数据（未上市/停牌/退市后）
                 if header is None:
                     header = self.shard(mkt, p, namespace, refresh=refresh)
-                chunk = self._slice_block(blk, start, end_eff)
+                chunk = self._slice_block(blk, start_eff, end_eff)
                 if chunk is None:
                     continue
                 for k in ("d", "o", "h", "l", "c", "v", "a"):
@@ -607,9 +609,9 @@ class Store:
                       "source": "", "af_scale": None}
 
         # 物化路径拿到的是全历史，带日期参数时二次切片
-        if mat is not None and (start is not None or end_eff is not None):
+        if mat is not None and (start_eff is not None or end_eff is not None):
             d = acc["d"]
-            lo = 0 if start is None else bisect_left(d, start)
+            lo = 0 if start_eff is None else bisect_left(d, start_eff)
             hi = len(d) if end_eff is None else bisect_right(d, end_eff)
             acc = {k: v[lo:hi] for k, v in acc.items()}
 
@@ -663,7 +665,8 @@ class Store:
             return {}
         start = _as_ymd(start, "start")
         end = _as_ymd(end, "end")
-        # min15：8 位 end 当日扩到 23:59（同 _assemble，见那里的注释）
+        # min15：8 位边界扩到当日 00:00 / 23:59（同 _assemble，见那里的注释）
+        start_eff = (start * 10000) if (start is not None and namespace == "min15") else start
         end_eff = (end * 10000 + 2359) if (end is not None and namespace == "min15") else end
 
         # 物化快路径：已物化的标的直接从本地文件装配（毫秒级），不碰分片
@@ -705,7 +708,7 @@ class Store:
                     continue
                 if st not in meta:
                     meta[st] = doc
-                chunk = self._slice_block(blk, start, end_eff)
+                chunk = self._slice_block(blk, start_eff, end_eff)
                 if chunk is None:
                     continue
                 tgt = acc[st]

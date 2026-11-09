@@ -37,7 +37,7 @@ NAMESPACES = ("stock", "index", "min15")
 
 # HTTP User-Agent。必须带自定义 UA：Cloudflare 等边缘节点默认拦截
 # Python-urllib/* 的请求（403），裸 urllib 会被当成 bot。
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 USER_AGENT = f"ohlcvault/{VERSION} (+https://github.com/helpquant/ohlcvault)"
 
 # 默认镜像链。可用 OHLCVAULT_MIRRORS 覆盖。
