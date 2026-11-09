@@ -188,6 +188,7 @@ part of the checksum chain and can be deleted/rebuilt at any time.
 | `calendar(market, start=, end=)` | Trading calendar |
 | `daily(code, start=, end=)` | Stock daily bars, cross-month stitching |
 | `index_daily(code, start=, end=)` | Index daily bars |
+| `min15_daily(code, start=, end=)` | 15-minute bars (`daily/min15/`, cn stocks; `d` = bar end time `YYYYMMDDHHMM`, no adjustment factors) |
 | `daily_many(codes, start=, end=)` | Batch read (preferred for backtests) |
 | `cross_section(market, date, sort_by=, limit=)` | Daily cross-section |
 | `adjust(bars_or_df, to="qfq"\|"hfq"\|"none")` | Adjustment view |

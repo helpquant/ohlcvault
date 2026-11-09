@@ -27,7 +27,8 @@ from .client import MarketClient
 from .config import AF_SCALE, MARKETS, NAMESPACES, PRICE_SCALE, SUPPORTED_SCHEMA
 from .errors import ContractError, DateError, NotSupported, UnknownMarket
 
-_SHARD_RE = re.compile(r"^daily/(?:idx/)?(?P<market>[a-z]{2})/(?P<period>\d{4}-\d{2})\.json\.gz$")
+_SHARD_RE = re.compile(
+    r"^daily/(?:(?P<ns>idx|min15)/)?(?P<market>[a-z]{2})/(?P<period>\d{4}-\d{2})\.json\.gz$")
 
 # 断面可按哪些字段排序。注意这里是**返回行**的键名（`amount`/`volume`…），
 # 不是 block 里的单字母键（`a`/`v`…）—— 两者不同，映射错了排序会静默全落到 None。
@@ -48,8 +49,14 @@ def _sort_none_last(rows: list[dict], key: str, ascending: bool) -> list[dict]:
 
 
 def period_of(d: int) -> str:
-    """20260918 → '2026-09'"""
-    return f"{d // 10000:04d}-{d // 100 % 100:02d}"
+    """20260918 → '2026-09'；min15 的 12 位 bar 日期 202609181500 同样正确。"""
+    day = d // 10000 if d >= 10_000_000_000 else d   # 12 位 YYYYMMDDHHMM → 8 位
+    return f"{day // 10000:04d}-{day // 100 % 100:02d}"
+
+
+def _ns_dir(namespace: str) -> str:
+    """命名空间 → 分片路径里 `daily/` 之后的子目录前缀。"""
+    return {"index": "idx/", "min15": "min15/"}.get(namespace, "")
 
 
 def periods_between(start: int, end: int) -> list[str]:
@@ -239,13 +246,13 @@ class Store:
         """快照里该市场该命名空间有哪些月份（已排序）。"""
         self._check_market(market)
         self._check_namespace(namespace)
+        # _SHARD_RE 的 ns 捕获组是裸名（None/'idx'/'min15'），按它过滤才不会串
+        want = {"stock": None, "index": "idx", "min15": "min15"}[namespace]
         out = []
         for rel in self.client.files():
             m = _SHARD_RE.match(rel)
-            if m and m.group("market") == market:
-                is_idx = rel.startswith("daily/idx/")
-                if is_idx == (namespace == "index"):
-                    out.append(m.group("period"))
+            if m and m.group("market") == market and (m.group("ns") or None) == want:
+                out.append(m.group("period"))
         return sorted(out)
 
     # ---------- 契约校验 ----------
@@ -279,6 +286,13 @@ class Store:
                 f"（本数据集只存事实、不存视图，SPEC.md §9.2）")
         if header.get("volume_unit") != "share":
             raise ContractError(f"{rel}: volume_unit={header.get('volume_unit')!r}，应为 'share'")
+        if namespace == "min15":
+            if header.get("interval") != "15min":
+                raise ContractError(
+                    f"{rel}: min15 必须声明 interval='15min'（SPEC.md §4.6）")
+            if header.get("bar_boundary") != "end":
+                raise ContractError(
+                    f"{rel}: min15 必须声明 bar_boundary='end'（bar 时刻=结束时刻）")
         if header.get("af_basis") == "unavailable" and "af_scale" in header:
             raise ContractError(
                 f"{rel}: af_basis='unavailable' 时不得出现 af_scale（SPEC.md §4.1）")
@@ -313,8 +327,7 @@ class Store:
         """取一个原始月分片（含文件头与全部 block）。带 LRU 缓存。"""
         self._check_market(market)
         self._check_namespace(namespace)
-        rel = (f"daily/{'idx/' if namespace == 'index' else ''}"
-               f"{market}/{period}.json.gz")
+        rel = f"daily/{_ns_dir(namespace)}{market}/{period}.json.gz"
         if not refresh and rel in self._shard_cache:
             self._shard_cache.move_to_end(rel)
             return self._shard_cache[rel]
@@ -337,8 +350,7 @@ class Store:
     def _block(self, market: str, period: str, storage: str,
                namespace: str, refresh: bool) -> dict | None:
         doc = self.shard(market, period, namespace, refresh=refresh)
-        rel = (f"daily/{'idx/' if namespace == 'index' else ''}"
-               f"{market}/{period}.json.gz")
+        rel = f"daily/{_ns_dir(namespace)}{market}/{period}.json.gz"
         idx = self._block_index.get(rel)
         if idx is not None:                     # O(1) 索引（shard() 已建）
             return idx.get(storage)
@@ -425,7 +437,7 @@ class Store:
 
     def _mat_path(self, storage: str, namespace: str) -> Path:
         sid = self.client.snapshot
-        ns = "idx" if namespace == "index" else "stock"
+        ns = {"index": "idx", "min15": "min15"}.get(namespace, "stock")
         return (Path(self.client.cache) / "symbols" / sid / ns
                 / f"{storage}.json.gz")
 
@@ -475,10 +487,12 @@ class Store:
         """物化文档 → Bars（可选二次切片）。"""
         acc = {k: list(doc[k])
                for k in ("d", "o", "h", "l", "c", "v", "a", "af")}
-        if start is not None or end is not None:
+        # min15：8 位 end 当日扩到 23:59（同 _assemble，见那里的注释）
+        end_eff = (end * 10000 + 2359) if (end is not None and namespace == "min15") else end
+        if start is not None or end_eff is not None:
             d = acc["d"]
             lo = 0 if start is None else bisect_left(d, start)
-            hi = len(d) if end is None else bisect_right(d, end)
+            hi = len(d) if end_eff is None else bisect_right(d, end_eff)
             acc = {k: v[lo:hi] for k, v in acc.items()}
         header = self._mat_header(doc, mkt)
         has_af = bool(doc.get("has_af"))
@@ -510,6 +524,18 @@ class Store:
         （两者的 `volume_unit` 归一乘数不同，混在一个文件里会污染全局口径）。"""
         return self._series(code, start, end, market, "index", refresh)
 
+    def min15_daily(self, code: str, start: int | None = None,
+                    end: int | None = None, market: str | None = None,
+                    refresh: bool = False) -> Bars:
+        """15 分钟线（`daily/min15/` 命名空间，SPEC §4.6；V1 仅 cn 个股）。
+
+        - `d` 是 **bar 结束时刻** `YYYYMMDDHHMM`（12 位），如 `202609181500`
+          = 当日 15:00 收盘 bar。`start`/`end` 仍传 8 位日期，按日切片。
+        - 无复权因子（`af_basis="unavailable"`）：分钟级不做复权，`af=None`，
+          对它调复权会得到明确报错而不是静默错误。
+        """
+        return self._series(code, start, end, market, "min15", refresh)
+
     def _series(self, code: str, start: int | str | None, end: int | str | None,
                 market: str | None, namespace: str, refresh: bool) -> Bars:
         start = _as_ymd(start, "start")
@@ -521,6 +547,9 @@ class Store:
 
     def _assemble(self, storage: str, mkt: str, namespace: str,
                   start: int | None, end: int | None, refresh: bool) -> Bars:
+        # min15 的 d 是 12 位结束时刻，8 位 end 当日（20260930）必须扩成
+        # 23:59（202609302359）—— 否则 bisect_right 会把当天所有 bar 切掉
+        end_eff = (end * 10000 + 2359) if (end is not None and namespace == "min15") else end
         mat = (self._mat_load(storage, namespace)
                if (self.materialize and not refresh) else None)
         if mat is not None:
@@ -547,7 +576,7 @@ class Store:
                     continue                  # 该月无数据（未上市/停牌/退市后）
                 if header is None:
                     header = self.shard(mkt, p, namespace, refresh=refresh)
-                chunk = self._slice_block(blk, start, end)
+                chunk = self._slice_block(blk, start, end_eff)
                 if chunk is None:
                     continue
                 for k in ("d", "o", "h", "l", "c", "v", "a"):
@@ -578,10 +607,10 @@ class Store:
                       "source": "", "af_scale": None}
 
         # 物化路径拿到的是全历史，带日期参数时二次切片
-        if mat is not None and (start is not None or end is not None):
+        if mat is not None and (start is not None or end_eff is not None):
             d = acc["d"]
             lo = 0 if start is None else bisect_left(d, start)
-            hi = len(d) if end is None else bisect_right(d, end)
+            hi = len(d) if end_eff is None else bisect_right(d, end_eff)
             acc = {k: v[lo:hi] for k, v in acc.items()}
 
         if self.validate:
@@ -606,9 +635,12 @@ class Store:
         if any(d[i] >= d[i + 1] for i in range(len(d) - 1)):
             raise ContractError(
                 f"{storage}: 跨月拼接后 d 非严格递增（分片可能重叠或串月）")
-        if start is not None and d and d[0] < start:
+        # min15 的 d 是 12 位（YYYYMMDDHHMM），与 8 位 start/end 比较前按日归一
+        def _day(x: int) -> int:
+            return x // 10000 if x >= 10_000_000_000 else x
+        if start is not None and d and _day(d[0]) < start:
             raise ContractError(f"{storage}: 结果含早于 start 的行")
-        if end is not None and d and d[-1] > end:
+        if end is not None and d and _day(d[-1]) > end:
             raise ContractError(f"{storage}: 结果含晚于 end 的行")
 
     def daily_many(self, codes: Iterable[str], start: int | None = None,
@@ -631,6 +663,8 @@ class Store:
             return {}
         start = _as_ymd(start, "start")
         end = _as_ymd(end, "end")
+        # min15：8 位 end 当日扩到 23:59（同 _assemble，见那里的注释）
+        end_eff = (end * 10000 + 2359) if (end is not None and namespace == "min15") else end
 
         # 物化快路径：已物化的标的直接从本地文件装配（毫秒级），不碰分片
         out: dict[str, Bars] = {}
@@ -671,7 +705,7 @@ class Store:
                     continue
                 if st not in meta:
                     meta[st] = doc
-                chunk = self._slice_block(blk, start, end)
+                chunk = self._slice_block(blk, start, end_eff)
                 if chunk is None:
                     continue
                 tgt = acc[st]

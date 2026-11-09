@@ -33,7 +33,7 @@ CREATE TABLE IF NOT EXISTS meta (key VARCHAR, value VARCHAR);
 CREATE TABLE IF NOT EXISTS bars (
     symbol    VARCHAR,   -- API 式代码，如 '600519.SH'
     market    VARCHAR,   -- 'cn' | 'hk' | 'us'
-    namespace VARCHAR,   -- 'stock' | 'index'
+    namespace VARCHAR,   -- 'stock' | 'index' | 'min15'
     d         BIGINT,    -- YYYYMMDD
     o         BIGINT,    -- 价格 × price_scale（定点整数，契约口径）
     h         BIGINT,
@@ -72,7 +72,8 @@ def to_duckdb(
     """把快照（或其子集）物化成本地 DuckDB 文件，返回文件路径。
 
     - `markets`：缺省导出全部市场；传 `["cn"]` 只导 A 股
-    - `namespaces`：默认 stock + index 都导
+    - `namespaces`：默认 stock + index 都导；传 `("stock", "index", "min15")`
+      可一并导出 15 分钟线（min15 是按需启用的命名空间，快照里可能没有）
     - `periods`：限定月份（如 `["2026-09"]`），小规模试用/测试用
     - `refresh=True`：删掉旧文件重导（同 sid 的文件存在时默认直接复用）
 
@@ -100,10 +101,15 @@ def to_duckdb(
             parts = rel.split("/")
             if parts[0] != "daily":
                 continue
-            ns = "index" if parts[1] == "idx" else "stock"
+            if parts[1] == "min15":
+                ns = "min15"                # daily/min15/{market}/…
+            elif parts[1] == "idx":
+                ns = "index"
+            else:
+                ns = "stock"
             if ns not in namespaces:
                 continue
-            market = parts[2 if ns == "index" else 1]
+            market = parts[2 if ns != "stock" else 1]
             if markets and market not in markets:
                 continue
             period = parts[-1].removesuffix(".json.gz")

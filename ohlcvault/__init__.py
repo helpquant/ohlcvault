@@ -192,6 +192,17 @@ def index_daily(code: str, start: int | str | None = None, end: int | str | None
                                 refresh=refresh)
 
 
+def min15_daily(code: str, start: int | str | None = None, end: int | str | None = None,
+                market: str | None = None, refresh: bool = False) -> Bars:
+    """15 分钟线（`daily/min15/`，V1 仅 cn 个股）。
+
+    `d` 是 bar 结束时刻 `YYYYMMDDHHMM`（12 位）；无复权因子（af=None）。
+    `start`/`end` 仍传 8 位日期（如 `"2026-09-18"`），按日切片。
+    """
+    return _store().min15_daily(code, start=start, end=end, market=market,
+                                refresh=refresh)
+
+
 def daily_many(codes, start: int | str | None = None, end: int | str | None = None,
                market: str | None = None, namespace: str = "stock",
                refresh: bool = False) -> dict[str, Bars]:
